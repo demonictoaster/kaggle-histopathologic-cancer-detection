@@ -1,0 +1,10 @@
+__pycache__/
+debug/
+input/
+output/
+temp/
+
+benchmark.py
+unzip.py
+zip.py
+test.zip
