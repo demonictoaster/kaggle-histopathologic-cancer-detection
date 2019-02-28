@@ -13,7 +13,7 @@ params = {
 	'cloud': False,  # if script to be run on paperspace.com using GPU
 	'val_size': 0.2,
 	'batch_size': 32,
-	'epochs': 1,
+	'epochs': 2,
 	'patience': 10,
 	'debug_train_size': 32*20,
 	'debug_val_size': 32*2,
