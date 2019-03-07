@@ -42,6 +42,8 @@ NOTES:
 TODO:
 - data augmentation
 - custom callback function
+	need to feed val generator and labels to callback fct
+	https://github.com/keras-team/keras/issues/3230
 """
 K.clear_session()
 
@@ -54,7 +56,7 @@ if not os.path.exists(OUT):
 
 file_label_map = pd.read_csv(INPUT + '/train_labels.csv')
 if params['debug'] == True:
-	file_label_map = file_label_map.iloc[0:400]
+	file_label_map = file_label_map.iloc[0:300]
 
 f2l_train, f2l_val = train_test_split(
 	file_label_map, 
@@ -157,28 +159,38 @@ val_generator = batch_generator(
 
 print('\nBuilding model . . .')
 
+# custom callback to print validation AUC at end of epoch
 class auc_callback(Callback):
-    def on_train_begin(self, logs={}):
-        self.aucs = []
-        self.losses = []
+	def __init__(self, val_gen, val_steps, val_labels):
+		self.val_gen = val_gen
+		self.val_steps = val_steps
+		self.labels = val_labels
+		self.aucs = []
 
-    def on_train_end(self, logs={}):
-        return
- 
-    def on_epoch_begin(self, epoch, logs={}):
-        return
- 
-    def on_epoch_end(self, epoch, logs={}):
-        self.losses.append(logs.get('loss'))
-        y_pred = self.model.predict(self.model.validation_data[0])
-        self.aucs.append(roc_auc_score(self.model.validation_data[1], y_pred))
-        return
- 
-    def on_batch_begin(self, batch, logs={}):
-        return
- 
-    def on_batch_end(self, batch, logs={}):
-        return
+	def on_train_begin(self, logs={}):
+		return
+
+	def on_train_end(self, logs={}):
+		return
+
+	def on_epoch_begin(self, epoch, logs={}):
+		return
+
+	def on_epoch_end(self, epoch, logs={}):
+		preds = self.model.predict_generator(self.val_gen, self.val_steps)
+		labels = self.labels
+
+		auc = roc_auc_score(labels, preds)
+		self.aucs.append(auc)
+
+		print('\rauc_val: %s' % (str(round(auc,4))))
+		return
+
+	def on_batch_begin(self, batch, logs={}):
+		return
+
+	def on_batch_end(self, batch, logs={}):
+		return
 
 callback_list = [
 	EarlyStopping(
@@ -190,6 +202,11 @@ callback_list = [
 		monitor='val_acc', 
 		save_best_only=True,
 		mode='max'
+		),
+	auc_callback(
+		val_generator, 
+		steps_val, 
+		f2l_val['label']
 		)
 	]
 

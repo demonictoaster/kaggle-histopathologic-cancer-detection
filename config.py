@@ -12,7 +12,7 @@ TODO:
 
 # params
 params = {
-	'debug': False,  # debug mode (uses less images)
+	'debug': True,  # debug mode (uses less images)
 	'cloud': False,  # if script to be run on paperspace.com using GPU
 	'val_size': 0.1,
 	'batch_size': 32,
