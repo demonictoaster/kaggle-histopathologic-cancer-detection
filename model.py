@@ -27,20 +27,23 @@ from keras import backend as K
 from config import *
 
 """
-NOTE:
+NOTES:
 - freezing InceptionV3 layers leads to weird results at test time due to
   bug linked to batch normalization layers 
   (http://blog.datumbox.com/the-batch-normalization-layer-of-keras-is-broken/)
+- for training, the number of steps per epoch is set to number of examples 
+  divided batch size, ignoring the remainder of the division. 
+  The few images that are not used in the epoch will be used in subsequent 
+  epoch since data is shuffled for training.
+- for validation, we create an extra batch using the last examples needed
+  to go through all examples present in the validation set (in case the number
+  of validation examples is not a multiple of the batch size)
 
 TODO:
 - data augmentation
 - custom callback function
-- fix val acc constant across epochs
-- speed up eval and pred parts (pred by batch)
 """
 K.clear_session()
-
-np.random.seed(12)
 
 train_path = os.path.join(INPUT, 'train')
 test_path = os.path.join(INPUT, 'test')
@@ -51,7 +54,7 @@ if not os.path.exists(OUT):
 
 file_label_map = pd.read_csv(INPUT + '/train_labels.csv')
 if params['debug'] == True:
-	file_label_map = file_label_map.iloc[0:512]
+	file_label_map = file_label_map.iloc[0:400]
 
 f2l_train, f2l_val = train_test_split(
 	file_label_map, 
@@ -63,8 +66,8 @@ batch_size = params['batch_size']
 epochs = params['epochs']
 N_train = f2l_train.shape[0]
 N_val = f2l_val.shape[0]
-steps_train = N_train // batch_size
-steps_val = N_val // batch_size
+steps_train = N_train // batch_size  # ignore remainder images (see NOTES)
+steps_val = int(np.ceil(N_val / batch_size))
 
 #################
 ### daga prep ###
@@ -83,16 +86,19 @@ def batch_generator(input_path,
 					mode='train', 
 					aug=None):
 
+	# shuffle data at each new epoch
+	# don't set seed otherwise always same batches
+	if mode == 'train':
+		f2l = f2l.reindex(np.random.permutation(f2l.index), copy=True)
+
 	n_files = f2l.shape[0]
 	idx = 0
+
 	while True:
 		imgs = []
 		lbls = []
 
-		# shuffle data at each new epoch
-		if mode == 'train':
-			f2l = f2l.reindex(np.random.permutation(f2l.index))
-
+		# fill the batch
 		while len(imgs) < batch_size:
 			f = f2l.iloc[idx, 0] + '.tif'
 			f_path = os.path.join(input_path, f)
@@ -106,11 +112,11 @@ def batch_generator(input_path,
 			idx += 1
 
 			if idx == n_files:
-				idx = 0  # fill batch with first files once reached the end
+				idx = 0  # in case we go through all files
 				if mode == 'eval':
 					break
 
-		if aug != None:
+		if (aug != None) & (mode=='train'):
 			pass
 
 		imgs = np.array(imgs)
@@ -133,16 +139,17 @@ val_generator = batch_generator(
 	mode='eval',
 	aug=None)
 
-# test generator
-# idx = 0
+# checks
+# cnt = 0
 # for i, j in train_generator:
-# 	idx += 1
-# 	print(idx)
+# 	cnt += 1
+# 	print(cnt)
 # 	print(i.shape)
 # 	print(np.mean(i))
-# 	if idx==25:
+# 	print(k)
+# 	print('-------')
+# 	if cnt==25:
 # 		break
-
 
 ###################
 ### build model ###
@@ -234,7 +241,7 @@ model.fit_generator(
     verbose=1
     )
 
-time_train = str(np.round((time.time() - ts) / 60, 2))
+time_train = np.round((time.time() - ts) / 60, 2)
 
 ####################################
 ### evaluate perf validation set ###
@@ -253,26 +260,41 @@ model.compile(
 	metrics=['accuracy']
 	)
 
-def predict_label(file_path):
-	img = load_image(file_path)
-	img = preprocess_input(img)
-	img = np.expand_dims(img, axis=0)
-	pred = float(model.predict(img))
-	return pred
+# reset validation generator
+val_generator = batch_generator(
+	train_path,
+	f2l_val,
+	batch_size,
+	mode='eval',
+	aug=None)
 
-preds = []
-for id in tqdm(f2l_val['id']):
-	f_path = os.path.join(train_path, id + '.tif')
-	pred = predict_label(f_path)
-	preds.append(pred)
+preds = model.predict_generator(
+	generator=val_generator, 
+	steps=steps_val, verbose=1)
 
 auc_val = roc_auc_score(np.array(f2l_val['label']), preds)
 
-time_eval = str(np.round((time.time() - ts) / 60, 2))
+time_eval = np.round((time.time() - ts) / 60, 2)
 
-model.evaluate_generator(generator=val_generator, steps=steps_val, verbose=1)
-preds = model.predict_generator(generator=val_generator, steps=steps_val, verbose=1)
-preds = np.squeeze(preds)
+# checks
+# model.evaluate_generator(generator=val_generator, steps=steps_val, verbose=1)
+
+# def get_pred(file_path):
+# 	img = load_image(file_path)
+# 	img = preprocess_input(img)
+# 	img = np.expand_dims(img, axis=0)
+# 	pred = float(model.predict(img))
+# 	return pred
+
+# preds = []
+# for id in tqdm(f2l_val['id']):
+# 	f_path = os.path.join(train_path, id + '.tif')
+# 	pred = get_pred(f_path)
+# 	preds.append(pred)
+
+# from sklearn.metrics import accuracy_score
+# preds_lab = np.array([1 if x>=0.5 else 0 for x in preds])
+# accuracy_score(np.array(f2l_val['label']), preds_lab)
 
 ########################
 ### make predictions ###
@@ -286,16 +308,36 @@ test_files = [f for f in os.listdir(test_path) if f.endswith('.tif')]
 if params['debug'] == True:
 	test_files = test_files[0:100]
 
-preds = []
-for f in tqdm(test_files):
-	f_path = os.path.join(test_path, f)
-	pred = predict_label(f_path)
-	preds.append(pred)	
+N_test = len(test_files)
+steps_test = int(np.ceil(N_test / batch_size))
 
-time_pred = str(np.round((time.time() - ts) / 60, 2))
+preds = []
+idx = 0
+for i in tqdm(range(steps_test)):
+	imgs = []
+
+	# fill batch
+	while len(imgs) < batch_size:
+		f = test_files[idx]
+		f_path = os.path.join(test_path, f)
+		img = load_image(f_path)
+		img = preprocess_input(img)
+		imgs.append(img)
+		idx += 1
+		if idx == N_test:
+			break
+
+	# predict and add to list
+	imgs = np.array(imgs)
+	pred = model.predict(imgs)
+	preds.extend(pred)
+
+preds = np.squeeze(preds)
 
 test_ids = [f[:-4] for f in test_files]
 submission = pd.DataFrame({'id': test_ids, 'label': preds})
+
+time_pred = np.round((time.time() - ts) / 60, 2)
 
 ####################
 ### export stuff ###
@@ -303,7 +345,9 @@ submission = pd.DataFrame({'id': test_ids, 'label': preds})
 
 print('\nSaving results . . .')
 
-def export_model(out_folder, score, model, params, submission):
+times = [time_train, time_eval, time_pred]
+
+def export_model(out_folder, score, model, params, submission, times):
 	score = round(score, 6)
 	today = datetime.datetime.now()
 	folder_name = today.strftime('%y%m%d') + '_' + today.strftime("%H%M") + \
@@ -312,13 +356,20 @@ def export_model(out_folder, score, model, params, submission):
 	os.mkdir(folder)
 
 	model.save(os.path.join(folder, 'model.h5'))
+
 	with open(os.path.join(folder, 'params.json'), 'w') as f:
 		json.dump(params, f)
+
 	submission.to_csv(os.path.join(folder, 'submission.csv'), index=False)
 
+	time_file = os.path.join(folder, 'compute_time.csv')
+	with open(time_file, 'w') as f:
+		f.write('train_time: %s\n' % times[0])
+		f.write('eval_time: %s\n' % times[1])
+		f.write('pred_time: %s\n' % times[2])
 
 if params['debug'] == False:
-	export_model(OUT, auc_val, model, params, submission)
+	export_model(OUT, auc_val, model, params, submission, times)
 
 
 print('\n-----------------------')

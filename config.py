@@ -12,7 +12,7 @@ TODO:
 
 # params
 params = {
-	'debug': True,  # debug mode (uses less images)
+	'debug': False,  # debug mode (uses less images)
 	'cloud': False,  # if script to be run on paperspace.com using GPU
 	'val_size': 0.1,
 	'batch_size': 32,
@@ -33,7 +33,7 @@ IMG_SIZE = 96
 
 # adjust some parameters if in debug mode
 if params['debug']==True:
-	params['epochs'] = 3
+	params['epochs'] = 4
 	params['val_size'] = 0.25
 
 # adjust some parameters if run on cloud
