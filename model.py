@@ -1,10 +1,11 @@
-import cv2
 import datetime
 import json
 import numpy as np
 import os
 import pandas as pd
 import time
+
+import cv2
 from tqdm import tqdm
 
 from sklearn.metrics import roc_auc_score
@@ -23,8 +24,10 @@ from keras.layers import Dense
 from keras.layers import GlobalAveragePooling2D
 from keras.layers import Input
 from keras import backend as K
+import tensorflow as tf
 
 from config import *
+
 
 """
 NOTES:
@@ -41,10 +44,8 @@ NOTES:
 
 TODO:
 - data augmentation
-- custom callback function
-	need to feed val generator and labels to callback fct
-	https://github.com/keras-team/keras/issues/3230
 """
+
 K.clear_session()
 
 train_path = os.path.join(INPUT, 'train')
@@ -56,7 +57,7 @@ if not os.path.exists(OUT):
 
 file_label_map = pd.read_csv(INPUT + '/train_labels.csv')
 if params['debug'] == True:
-	file_label_map = file_label_map.iloc[0:300]
+	file_label_map = file_label_map.iloc[0:200]
 
 f2l_train, f2l_val = train_test_split(
 	file_label_map, 
@@ -159,13 +160,12 @@ val_generator = batch_generator(
 
 print('\nBuilding model . . .')
 
-# custom callback to print validation AUC at end of epoch
+# custom callback to get validation AUC at end of epoch
 class auc_callback(Callback):
 	def __init__(self, val_gen, val_steps, val_labels):
 		self.val_gen = val_gen
 		self.val_steps = val_steps
 		self.labels = val_labels
-		self.aucs = []
 
 	def on_train_begin(self, logs={}):
 		return
@@ -181,9 +181,9 @@ class auc_callback(Callback):
 		labels = self.labels
 
 		auc = roc_auc_score(labels, preds)
-		self.aucs.append(auc)
+		logs['val_auc'] = auc
+		print(' - val_auc: %s' % (str(round(auc,4))))
 
-		print('\rauc_val: %s' % (str(round(auc,4))))
 		return
 
 	def on_batch_begin(self, batch, logs={}):
@@ -193,20 +193,20 @@ class auc_callback(Callback):
 		return
 
 callback_list = [
-	EarlyStopping(
-		monitor='val_acc', 
-		patience=params['patience']
-		),
-	ModelCheckpoint(
-		filepath=os.path.join(OUT, 'model.h5'), 
-		monitor='val_acc', 
-		save_best_only=True,
-		mode='max'
-		),
 	auc_callback(
 		val_generator, 
 		steps_val, 
 		f2l_val['label']
+		),
+	EarlyStopping(
+		monitor='val_auc', 
+		patience=params['patience']
+		),
+	ModelCheckpoint(
+		filepath=os.path.join(OUT, 'model.h5'), 
+		monitor='val_auc', 
+		save_best_only=True,
+		mode='max'
 		)
 	]
 
@@ -258,42 +258,41 @@ model.fit_generator(
     verbose=1
     )
 
+auc_val =max(model.history.history['val_auc'])
+
 time_train = np.round((time.time() - ts) / 60, 2)
 
-####################################
-### evaluate perf validation set ###
-####################################
+if False:
+	import matplotlib.pyplot as plt
+	plt.plot(model.history.history['acc'])
+	plt.plot(model.history.history['val_acc'])
+	plt.ylabel('Accuracy')
+	plt.xlabel('Epoch')
+	plt.legend(['Train', 'Val'], loc='upper left')
+	plt.show()
 
-print('\nEvaluating model . . .')
+# CHECKS
+# K.clear_session()
+# model = load_model(os.path.join(OUT, 'model.h5'), compile=False)
+# model.compile(
+# 	optimizer='adam', 
+# 	loss='binary_crossentropy', 
+# 	metrics=['accuracy']
+# 	)
 
-ts = time.time()
+# val_generator = batch_generator(
+# 	train_path,
+# 	f2l_val,
+# 	batch_size,
+# 	mode='eval',
+# 	aug=None)
 
-# load best model (model.fit returns weights of last training epoch)
-K.clear_session()
-model = load_model(os.path.join(OUT, 'model.h5'), compile=False)
-model.compile(
-	optimizer='adam', 
-	loss='binary_crossentropy', 
-	metrics=['accuracy']
-	)
+# preds = model.predict_generator(
+# 	generator=val_generator, 
+# 	steps=steps_val, verbose=1)
 
-# reset validation generator
-val_generator = batch_generator(
-	train_path,
-	f2l_val,
-	batch_size,
-	mode='eval',
-	aug=None)
+# auc_val = roc_auc_score(np.array(f2l_val['label']), preds)
 
-preds = model.predict_generator(
-	generator=val_generator, 
-	steps=steps_val, verbose=1)
-
-auc_val = roc_auc_score(np.array(f2l_val['label']), preds)
-
-time_eval = np.round((time.time() - ts) / 60, 2)
-
-# checks
 # model.evaluate_generator(generator=val_generator, steps=steps_val, verbose=1)
 
 # def get_pred(file_path):
@@ -320,6 +319,15 @@ time_eval = np.round((time.time() - ts) / 60, 2)
 print('\nMaking predictions . . .')
 
 ts = time.time()
+
+# load best model
+K.clear_session()
+model = load_model(os.path.join(OUT, 'model.h5'), compile=False)
+model.compile(
+	optimizer='adam', 
+	loss='binary_crossentropy', 
+	metrics=['accuracy']
+	)
 
 test_files = [f for f in os.listdir(test_path) if f.endswith('.tif')]
 if params['debug'] == True:
@@ -362,7 +370,7 @@ time_pred = np.round((time.time() - ts) / 60, 2)
 
 print('\nSaving results . . .')
 
-times = [time_train, time_eval, time_pred]
+times = [time_train, time_pred]
 
 def export_model(out_folder, score, model, params, submission, times):
 	score = round(score, 6)
@@ -382,8 +390,7 @@ def export_model(out_folder, score, model, params, submission, times):
 	time_file = os.path.join(folder, 'compute_time.csv')
 	with open(time_file, 'w') as f:
 		f.write('train_time: %s\n' % times[0])
-		f.write('eval_time: %s\n' % times[1])
-		f.write('pred_time: %s\n' % times[2])
+		f.write('pred_time: %s\n' % times[1])
 
 if params['debug'] == False:
 	export_model(OUT, auc_val, model, params, submission, times)
@@ -393,6 +400,5 @@ print('\n-----------------------')
 print('SUMMARY:')
 print('-VAL AUC: %s' % round(auc_val, 6))
 print('-TRAIN TIME: %s' % time_train)
-print('-EVAL TIME: %s' % time_eval)
 print('-PRED TIME: %s' % time_pred)
 print('-----------------------')
