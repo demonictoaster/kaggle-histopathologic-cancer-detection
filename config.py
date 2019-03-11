@@ -7,7 +7,7 @@ NOTE:
 - this config file stores global parameters
 
 TODO:
-- print parameters used
+- 
 """
 
 # params
@@ -16,7 +16,9 @@ params = {
 	'cloud': False,  # if script to be run via paperspace.com using GPU
 	'val_size': 0.1,
 	'batch_size': 32,
-	'epochs': 5,
+	'epochs': 10,
+	'learning_rate': 0.0001,
+	'val_metric': 'val_acc',  # 'val_acc' (accuracy) or 'val_auc' (AUC)
 	'early_stopping': False,
 	'patience': 10}
 
@@ -40,12 +42,19 @@ if params['cloud'] == True:
 	INPUT = '/storage/kaggle_cancer_competition/input'
 
 # print current parameters
-print('\n-----------------------')
+print('\n--------------------------')
 print('RUNNING WITH PARAMETERS:')
 print('-DEBUG = %s' % params['debug'])
 print('-CLOUD = %s' % params['cloud'])
 print('-VALIDATION SIZE = %s' % params['val_size'])
 print('-BATCH SIZE = %s' % params['batch_size'])
 print('-EPOCHS = %s' % params['epochs'])
+print('-LEARNING RATE = %s' % params['learning_rate'])
+print('-VALIDATION METRIC = %s' % params['val_metric'])
+print('-EARLY STOPPING = %s' % params['early_stopping'])
 print('-PATIENCE = %s' % params['patience'])
-print('-----------------------')
+print('--------------------------')
+
+# some checks
+if params['val_metric'] not in ['val_acc', 'val_auc']:
+	raise ValueError('`val_metric` should be either `val_acc` or `val_auc`')

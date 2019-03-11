@@ -1,3 +1,7 @@
+import matplotlib
+# when running on server: force matplotlib to not use any Xwindows backend
+matplotlib.use('Agg')
+
 import datetime
 import json
 import matplotlib.pyplot as plt
@@ -8,23 +12,17 @@ import time
 
 import cv2
 from tqdm import tqdm
-
 from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import train_test_split
 # from keras.applications.inception_v3 import InceptionV3
 # from keras.applications.inception_v3 import preprocess_input
-from keras.applications.nasnet import NASNetMobile
-from keras.applications.nasnet import preprocess_input
-from keras.callbacks import Callback
-from keras.callbacks import CSVLogger
-from keras.callbacks import EarlyStopping
-from keras.callbacks import ModelCheckpoint
+from keras.applications.nasnet import NASNetMobile, preprocess_input
+from keras.callbacks import Callback, CSVLogger, EarlyStopping, ModelCheckpoint
 from keras.preprocessing import image
-from keras.models import Model
-from keras.models import load_model
-from keras.layers import Dense
-from keras.layers import GlobalAveragePooling2D
-from keras.layers import Input
+from keras.models import Model, load_model
+from keras.layers import Concatenate, Dense, Dropout, Flatten, Input
+from keras.layers import GlobalAveragePooling2D, GlobalMaxPooling2D
+from keras.optimizers import Adam
 from keras import backend as K
 import tensorflow as tf
 
@@ -46,17 +44,13 @@ NOTES:
 
 TODO:
 - data augmentation
-- name folder according to architecture
-- save plots to check overfitting
+- val_auc computed during training seems wrong (huge jumps across epoch)
 """
 
 K.clear_session()
 
 train_path = os.path.join(INPUT, 'train')
 test_path = os.path.join(INPUT, 'test')
-
-OUT  = os.path.join(OUTPUT, 'benchmark')
-os.makedirs(OUT) if not os.path.isdir(OUT) else None
     
 file_label_map = pd.read_csv(INPUT + '/train_labels.csv')
 if params['debug'] == True:
@@ -145,7 +139,7 @@ val_generator = batch_generator(
 	mode='eval',
 	aug=None)
 
-# checks
+# CHECKS
 # cnt = 0
 # for i, j in train_generator:
 # 	cnt += 1
@@ -196,25 +190,32 @@ class auc_callback(Callback):
 		return
 
 log_name = 'train_log.csv'
-log_file = os.path.join(OUT, log_name)
+log_file = os.path.join(OUTPUT, log_name)
 os.remove(log_file) if os.path.exists(log_file) else None
 
-
 callback_list = [
-	auc_callback(
-		val_generator, steps_val, f2l_val['label']),
 	ModelCheckpoint(
-		filepath=os.path.join(OUT, 'model.h5'), 
-		monitor='val_auc', 
+		filepath=os.path.join(OUTPUT, 'model.h5'), 
+		monitor=params['val_metric'], 
 		save_best_only=True,
 		mode='max'),
 	CSVLogger(log_file)]
 
-if params['early_stopping'] == True:
+if params['val_metric'] == 'val_auc':
 	callback_list.insert(
-		1, 
+		0, 
+		auc_callback(val_generator, steps_val, f2l_val['label']))
+
+if params['early_stopping'] == True:
+	if params['val_metric']=='val_auc':
+		pos = 1
+	else:
+		pos = 0
+
+	callback_list.insert(
+		pos, 
 		EarlyStopping(
-			monitor='val_auc', 
+			monitor=params['val_metric'],
 			patience=params['patience']))
 
 def build_model(input_shape=(IMG_SIZE, IMG_SIZE, 3)):
@@ -229,14 +230,17 @@ def build_model(input_shape=(IMG_SIZE, IMG_SIZE, 3)):
 	#     	l.trainable = False
 
 	X = base_model(X_input)
-	X = GlobalAveragePooling2D()(X)
-	X = Dense(1024, activation='relu')(X)
-	X = Dense(1, activation='sigmoid')(X)
+	X1 = GlobalMaxPooling2D()(X)
+	X2 = GlobalAveragePooling2D()(X)
+	X3 = Flatten()(X)
+	X = Concatenate(axis=-1)([X1, X2, X3])
+	X = Dropout(0.5)(X)
+	X_output = Dense(1, activation='sigmoid')(X)
 
-	model = Model(inputs=X_input, outputs=X)
+	model = Model(inputs=X_input, outputs=X_output)
 
 	model.compile(
-		optimizer='adam',
+		optimizer=Adam(params['learning_rate']),
 		loss='binary_crossentropy',
 		metrics=['accuracy'])
 
@@ -264,41 +268,60 @@ model.fit_generator(
     use_multiprocessing=True,
     verbose=2)
 
-auc_val = max(model.history.history['val_auc'])
-
 time_train = np.round((time.time() - ts) / 60, 2)
 
-if False:
-	import matplotlib.pyplot as plt
-	plt.plot(model.history.history['acc'])
-	plt.plot(model.history.history['val_acc'])
-	plt.ylabel('Accuracy')
-	plt.xlabel('Epoch')
+# make architecture folder and export subfolder
+arc_folder  = os.path.join(OUTPUT, architecture)  # e.g. './NasNet'
+os.makedirs(arc_folder) if not os.path.isdir(arc_folder) else None
+
+if params['debug'] == False:
+	score = round(auc_val, 6)
+	today = datetime.datetime.now()
+	exp_folder = today.strftime('%y%m%d') + '_' + today.strftime("%H%M") + \
+			'_score_' + str(score)
+	exp_folder = os.path.join(arc_folder, exp_folder)
+	os.mkdir(exp_folder) if not os.path.isdir(exp_folder) else None
+
+	# save plot
+	plt.plot(model.history.history['acc'], label='Accuracy')
+	plt.plot(model.history.history['val_acc'], label='Epoch')
 	plt.legend(['Train', 'Val'], loc='upper left')
-	plt.show()
+	plt.savefig(os.path.join(exp_folder, 'plot_acc.png'))
+
+#####################
+### get AUC score ###
+#####################
+
+print('\nGetting AUC . . .')
+
+if params['val_metric'] == 'val_auc':
+	# if val_auc computed: stored in model history
+	auc_val = max(model.history.history['val_auc'])
+
+# load best model (fit_generator() returns weights of last epoch)
+K.clear_session()
+model = load_model(os.path.join(OUTPUT, 'model.h5'), compile=False)
+model.compile(
+	optimizer=Adam(params['learning_rate']), 
+	loss='binary_crossentropy', 
+	metrics=['accuracy'])
+
+if params['val_metric'] == 'val_acc':
+	# reset generator
+	val_generator = batch_generator(
+		train_path,
+		f2l_val,
+		batch_size,
+		mode='eval',
+		aug=None)
+
+	preds = model.predict_generator(
+		generator=val_generator, 
+		steps=steps_val, verbose=1)
+
+	auc_val = roc_auc_score(np.array(f2l_val['label']), preds)
 
 # CHECKS
-# K.clear_session()
-# model = load_model(os.path.join(OUT, 'model.h5'), compile=False)
-# model.compile(
-# 	optimizer='adam', 
-# 	loss='binary_crossentropy', 
-# 	metrics=['accuracy']
-# 	)
-
-# val_generator = batch_generator(
-# 	train_path,
-# 	f2l_val,
-# 	batch_size,
-# 	mode='eval',
-# 	aug=None)
-
-# preds = model.predict_generator(
-# 	generator=val_generator, 
-# 	steps=steps_val, verbose=1)
-
-# auc_val = roc_auc_score(np.array(f2l_val['label']), preds)
-
 # model.evaluate_generator(generator=val_generator, steps=steps_val, verbose=1)
 
 # def get_pred(file_path):
@@ -325,14 +348,6 @@ if False:
 print('\nMaking predictions . . .')
 
 ts = time.time()
-
-# load best model
-K.clear_session()
-model = load_model(os.path.join(OUT, 'model.h5'), compile=False)
-model.compile(
-	optimizer='adam', 
-	loss='binary_crossentropy', 
-	metrics=['accuracy'])
 
 test_files = [f for f in os.listdir(test_path) if f.endswith('.tif')]
 if params['debug'] == True:
@@ -379,18 +394,10 @@ summary = pd.DataFrame(
 	[architecture, auc_val, time_train, time_pred],
 	index=['architecture', 'auc_val', 'time_train', 'time_pred'])
 
-# create export folder
-score = round(auc_val, 6)
-today = datetime.datetime.now()
-exp_folder = today.strftime('%y%m%d') + '_' + today.strftime("%H%M") + \
-		'_score_' + str(score)
-exp_folder = os.path.join(OUT, exp_folder)
-os.mkdir(exp_folder)
-
 def export_model(folder, model, params, submission, summary):
 	model.save(os.path.join(folder, 'model.h5'))
-	with open(os.path.join(folder, 'params.json'), 'w') as f:
-		json.dump(params, f)
+	params_df = pd.DataFrame.from_dict(params, orient='index')
+	params_df.to_csv(os.path.join(folder, 'params.csv'), header=False)
 	submission.to_csv(os.path.join(folder, 'submission.csv'), index=False)
 	summary.to_csv(os.path.join(folder, 'summary.csv'), header=False)
 
