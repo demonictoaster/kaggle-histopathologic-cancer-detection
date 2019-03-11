@@ -13,15 +13,12 @@ TODO:
 # params
 params = {
 	'debug': True,  # debug mode (uses less images)
-	'cloud': True,  # if script to be run on paperspace.com using GPU
+	'cloud': False,  # if script to be run via paperspace.com using GPU
 	'val_size': 0.1,
 	'batch_size': 32,
-	'epochs': 1,
-	'patience': 10,
-	'debug_train_size': 32*20,
-	'debug_val_size': 32*2,
-	'debug_test_size': 32*2
-	}
+	'epochs': 5,
+	'early_stopping': False,
+	'patience': 10}
 
 # folders
 ROOT = os.path.abspath('')
@@ -37,7 +34,7 @@ if params['debug']==True:
 	params['epochs'] = 4
 	params['patience'] = 2
 
-# adjust some parameters if run on cloud
+# adjust folders if run in cloud
 if params['cloud'] == True:
 	OUTPUT = '/storage/kaggle_cancer_competition/output'
 	INPUT = '/storage/kaggle_cancer_competition/input'

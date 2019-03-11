@@ -1,5 +1,6 @@
 import datetime
 import json
+import matplotlib.pyplot as plt
 import numpy as np
 import os
 import pandas as pd
@@ -15,6 +16,7 @@ from sklearn.model_selection import train_test_split
 from keras.applications.nasnet import NASNetMobile
 from keras.applications.nasnet import preprocess_input
 from keras.callbacks import Callback
+from keras.callbacks import CSVLogger
 from keras.callbacks import EarlyStopping
 from keras.callbacks import ModelCheckpoint
 from keras.preprocessing import image
@@ -44,6 +46,8 @@ NOTES:
 
 TODO:
 - data augmentation
+- name folder according to architecture
+- save plots to check overfitting
 """
 
 K.clear_session()
@@ -52,9 +56,8 @@ train_path = os.path.join(INPUT, 'train')
 test_path = os.path.join(INPUT, 'test')
 
 OUT  = os.path.join(OUTPUT, 'benchmark')
-if not os.path.exists(OUT):
-    os.makedirs(OUT)
-
+os.makedirs(OUT) if not os.path.isdir(OUT) else None
+    
 file_label_map = pd.read_csv(INPUT + '/train_labels.csv')
 if params['debug'] == True:
 	file_label_map = file_label_map.iloc[0:200]
@@ -192,31 +195,34 @@ class auc_callback(Callback):
 	def on_batch_end(self, batch, logs={}):
 		return
 
+log_name = 'train_log.csv'
+log_file = os.path.join(OUT, log_name)
+os.remove(log_file) if os.path.exists(log_file) else None
+
+
 callback_list = [
 	auc_callback(
-		val_generator, 
-		steps_val, 
-		f2l_val['label']
-		),
-	EarlyStopping(
-		monitor='val_auc', 
-		patience=params['patience']
-		),
+		val_generator, steps_val, f2l_val['label']),
 	ModelCheckpoint(
 		filepath=os.path.join(OUT, 'model.h5'), 
 		monitor='val_auc', 
 		save_best_only=True,
-		mode='max'
-		)
-	]
+		mode='max'),
+	CSVLogger(log_file)]
+
+if params['early_stopping'] == True:
+	callback_list.insert(
+		1, 
+		EarlyStopping(
+			monitor='val_auc', 
+			patience=params['patience']))
 
 def build_model(input_shape=(IMG_SIZE, IMG_SIZE, 3)):
 	X_input = Input(shape=input_shape)
 	base_model = NASNetMobile(
 		input_tensor=X_input,
 		include_top=False, 
-		weights='imagenet'
-		)
+		weights='imagenet')
 
 	# if params['debug']==True:
 	# 	for l in base_model.layers:
@@ -232,13 +238,13 @@ def build_model(input_shape=(IMG_SIZE, IMG_SIZE, 3)):
 	model.compile(
 		optimizer='adam',
 		loss='binary_crossentropy',
-		metrics=['accuracy']
-		)
+		metrics=['accuracy'])
 
 	return model
 
 model = build_model()
 model.summary()
+architecture = model.layers[1].name
 
 ###################
 ### train model ###
@@ -255,10 +261,10 @@ model.fit_generator(
     callbacks=callback_list,
     validation_data=val_generator,
     validation_steps=steps_val,
-    verbose=1
-    )
+    use_multiprocessing=True,
+    verbose=2)
 
-auc_val =max(model.history.history['val_auc'])
+auc_val = max(model.history.history['val_auc'])
 
 time_train = np.round((time.time() - ts) / 60, 2)
 
@@ -326,8 +332,7 @@ model = load_model(os.path.join(OUT, 'model.h5'), compile=False)
 model.compile(
 	optimizer='adam', 
 	loss='binary_crossentropy', 
-	metrics=['accuracy']
-	)
+	metrics=['accuracy'])
 
 test_files = [f for f in os.listdir(test_path) if f.endswith('.tif')]
 if params['debug'] == True:
@@ -370,31 +375,28 @@ time_pred = np.round((time.time() - ts) / 60, 2)
 
 print('\nSaving results . . .')
 
-times = [time_train, time_pred]
+summary = pd.DataFrame(
+	[architecture, auc_val, time_train, time_pred],
+	index=['architecture', 'auc_val', 'time_train', 'time_pred'])
 
-def export_model(out_folder, score, model, params, submission, times):
-	score = round(score, 6)
-	today = datetime.datetime.now()
-	folder_name = today.strftime('%y%m%d') + '_' + today.strftime("%H%M") + \
- 		'_score_' + str(score)
-	folder = os.path.join(out_folder, folder_name)
-	os.mkdir(folder)
+# create export folder
+score = round(auc_val, 6)
+today = datetime.datetime.now()
+exp_folder = today.strftime('%y%m%d') + '_' + today.strftime("%H%M") + \
+		'_score_' + str(score)
+exp_folder = os.path.join(OUT, exp_folder)
+os.mkdir(exp_folder)
 
+def export_model(folder, model, params, submission, summary):
 	model.save(os.path.join(folder, 'model.h5'))
-
 	with open(os.path.join(folder, 'params.json'), 'w') as f:
 		json.dump(params, f)
-
 	submission.to_csv(os.path.join(folder, 'submission.csv'), index=False)
-
-	time_file = os.path.join(folder, 'compute_time.csv')
-	with open(time_file, 'w') as f:
-		f.write('train_time: %s\n' % times[0])
-		f.write('pred_time: %s\n' % times[1])
+	summary.to_csv(os.path.join(folder, 'summary.csv'), header=False)
 
 if params['debug'] == False:
-	export_model(OUT, auc_val, model, params, submission, times)
-
+	export_model(exp_folder, model, params, submission, summary)
+	os.rename(log_file, os.path.join(exp_folder, log_name))  # save log
 
 print('\n-----------------------')
 print('SUMMARY:')
