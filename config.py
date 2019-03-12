@@ -33,7 +33,7 @@ IMG_SIZE = 96
 # adjust some parameters if in debug mode
 if params['debug']==True:
 	params['val_size'] = 0.25
-	params['epochs'] = 4
+	params['epochs'] = 5
 	params['patience'] = 2
 
 # adjust folders if run in cloud

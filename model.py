@@ -44,7 +44,7 @@ NOTES:
 
 TODO:
 - data augmentation
-- val_auc computed during training seems wrong (huge jumps across epoch)
+- make batch_generator thread safe
 """
 
 K.clear_session()
@@ -83,7 +83,7 @@ def load_image(file_path):
 def batch_generator(input_path, 
 					f2l, 
 					batch_size, 
-					mode='train', 
+					mode='train',  # 'train' or 'eval'
 					aug=None):
 
 	# shuffle data at each new epoch
@@ -141,14 +141,14 @@ val_generator = batch_generator(
 
 # CHECKS
 # cnt = 0
-# for i, j in train_generator:
+# for i, j in val_generator:
 # 	cnt += 1
 # 	print(cnt)
 # 	print(i.shape)
 # 	print(np.mean(i))
-# 	print(k)
+# 	print(j)
 # 	print('-------')
-# 	if cnt==25:
+# 	if cnt==steps_val:
 # 		break
 
 ###################
@@ -174,7 +174,10 @@ class auc_callback(Callback):
 		return
 
 	def on_epoch_end(self, epoch, logs={}):
-		preds = self.model.predict_generator(self.val_gen, self.val_steps)
+		preds = self.model.predict_generator(
+			self.val_gen, 
+			self.val_steps, 
+			workers=0)  # use main thread since batch_generator not thread-safe
 		labels = self.labels
 
 		auc = roc_auc_score(labels, preds)
@@ -317,12 +320,14 @@ if params['val_metric'] == 'val_acc':
 
 	preds = model.predict_generator(
 		generator=val_generator, 
-		steps=steps_val, verbose=1)
+		steps=steps_val, 
+		verbose=1,
+		workers=0)
 
 	auc_val = roc_auc_score(np.array(f2l_val['label']), preds)
 
 # CHECKS
-# model.evaluate_generator(generator=val_generator, steps=steps_val, verbose=1)
+model.evaluate_generator(generator=val_generator, steps=steps_val, verbose=1)
 
 # def get_pred(file_path):
 # 	img = load_image(file_path)
