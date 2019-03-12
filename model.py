@@ -1,9 +1,7 @@
 import matplotlib
 # when running on server: force matplotlib to not use any Xwindows backend
 matplotlib.use('Agg')
-
 import datetime
-import json
 import matplotlib.pyplot as plt
 import numpy as np
 import os
@@ -11,6 +9,8 @@ import pandas as pd
 import time
 
 import cv2
+from imgaug import augmenters as iaa
+import imgaug as ia
 from tqdm import tqdm
 from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import train_test_split
@@ -41,6 +41,8 @@ NOTES:
 - for validation, we create an extra batch using the last examples needed
   to go through all examples present in the validation set (in case the number
   of validation examples is not a multiple of the batch size)
+- applying image augmentation doesn't increase batch size, only replaces
+  a random subset of the images within the batch
 
 TODO:
 - data augmentation
@@ -51,7 +53,7 @@ K.clear_session()
 
 train_path = os.path.join(INPUT, 'train')
 test_path = os.path.join(INPUT, 'test')
-    
+	
 file_label_map = pd.read_csv(INPUT + '/train_labels.csv')
 if params['debug'] == True:
 	file_label_map = file_label_map.iloc[0:200]
@@ -59,8 +61,7 @@ if params['debug'] == True:
 f2l_train, f2l_val = train_test_split(
 	file_label_map, 
 	test_size=params['val_size'],
-	random_state=12
-	)
+	random_state=12)
 
 batch_size = params['batch_size']
 epochs = params['epochs']
@@ -80,11 +81,62 @@ def load_image(file_path):
 	img = img[:,:,::-1]  # BGR -> RGB
 	return img
 
+# data augmentation (slightly adapted from https://github.com/aleju/imgaug)
+def get_augmenter():
+	# apply augmenter in 50% of cases
+	sometimes = lambda aug: iaa.Sometimes(0.5, aug)
+
+	seq = iaa.Sequential(
+		[
+			iaa.Fliplr(0.5),
+			iaa.Flipud(0.2),
+
+			sometimes(iaa.Affine(
+				scale={"x": (0.9, 1.1), "y": (0.9, 1.1)},
+				translate_percent={"x": (-0.1, 0.1), "y": (-0.1, 0.1)},
+				rotate=(-10, 10),
+				shear=(-5, 5),
+				order=[0, 1],
+				cval=(0, 255),
+				mode=ia.ALL
+			)),
+			# execute 0 to 5 of the following (less important) augmenters
+			# don't execute all of them, as that would often be way too strong
+			iaa.SomeOf((0, 5),
+				[
+					iaa.OneOf([
+						iaa.GaussianBlur((0, 1)),
+						iaa.AverageBlur(k=(3, 5)),
+						iaa.MedianBlur(k=(3, 5)),
+					]),
+					iaa.Sharpen(alpha=(0, 1.0), lightness=(0.9, 1.1)),
+					iaa.Emboss(alpha=(0, 1.0), strength=(0, 2.0)),
+					iaa.AddToHueAndSaturation((-1, 1)),
+					# either change the brightness of the whole image
+					# or change the brightness of subareas
+					iaa.OneOf([
+						iaa.Multiply((0.9, 1.1), per_channel=0.5),
+						iaa.FrequencyNoiseAlpha(
+							exponent=(-1, 0),
+							first=iaa.Multiply((0.9, 1.1), per_channel=True),
+							second=iaa.ContrastNormalization((0.9, 1.1))
+						)
+					]),
+					iaa.ContrastNormalization((0.9, 1.1), per_channel=0.5),
+				],
+				random_order=True
+			)
+		],
+		random_order=True
+	)
+
+	return seq
+
 def batch_generator(input_path, 
 					f2l, 
 					batch_size, 
 					mode='train',  # 'train' or 'eval'
-					aug=None):
+					aug=True):
 
 	# shuffle data at each new epoch
 	# don't set seed otherwise always same batches
@@ -93,6 +145,9 @@ def batch_generator(input_path,
 
 	n_files = f2l.shape[0]
 	idx = 0
+
+	if aug==True:
+		seq = get_augmenter() 
 
 	while True:
 		imgs = []
@@ -103,7 +158,6 @@ def batch_generator(input_path,
 			f = f2l.iloc[idx, 0] + '.tif'
 			f_path = os.path.join(input_path, f)
 			img = load_image(f_path)
-			img = preprocess_input(img)
 			imgs.append(img)
 
 			lbl = f2l.iloc[idx, 1]
@@ -116,39 +170,39 @@ def batch_generator(input_path,
 				if mode == 'eval':
 					break
 
-		if (aug != None) & (mode=='train'):
-			pass
+		if aug == True:
+			imgs = seq.augment_images(imgs)
 
+		imgs = [preprocess_input(i) for i in imgs]
 		imgs = np.array(imgs)
 		lbls = np.array(lbls).reshape(len(lbls), 1)
 
 		yield(imgs, lbls)
 
-# initialize the generators
+# initialize the generators (see utils.py)
 train_generator = batch_generator(
 	train_path,
 	f2l_train,
 	batch_size,
 	mode='train',
-	aug=None)
+	aug=True)
 
 val_generator = batch_generator(
 	train_path,
 	f2l_val,
 	batch_size,
 	mode='eval',
-	aug=None)
+	aug=False)
 
 # CHECKS
 # cnt = 0
-# for i, j in val_generator:
+# for i, j in train_generator:
 # 	cnt += 1
 # 	print(cnt)
 # 	print(i.shape)
 # 	print(np.mean(i))
-# 	print(j)
 # 	print('-------')
-# 	if cnt==steps_val:
+# 	if cnt==6:
 # 		break
 
 ###################
@@ -262,14 +316,14 @@ print('\nTraining model . . .')
 ts = time.time()
 
 model.fit_generator(
-    generator=train_generator,
-    steps_per_epoch= steps_train,
-    epochs=epochs,
-    callbacks=callback_list,
-    validation_data=val_generator,
-    validation_steps=steps_val,
-    use_multiprocessing=True,
-    verbose=2)
+	generator=train_generator,
+	steps_per_epoch= steps_train,
+	epochs=epochs,
+	callbacks=callback_list,
+	validation_data=val_generator,
+	validation_steps=steps_val,
+	use_multiprocessing=True,
+	verbose=2)
 
 time_train = np.round((time.time() - ts) / 60, 2)
 
@@ -278,10 +332,8 @@ arc_folder  = os.path.join(OUTPUT, architecture)  # e.g. './NasNet'
 os.makedirs(arc_folder) if not os.path.isdir(arc_folder) else None
 
 if params['debug'] == False:
-	score = round(auc_val, 6)
 	today = datetime.datetime.now()
-	exp_folder = today.strftime('%y%m%d') + '_' + today.strftime("%H%M") + \
-			'_score_' + str(score)
+	exp_folder = today.strftime('%y%m%d') + '_' + today.strftime("%H%M")
 	exp_folder = os.path.join(arc_folder, exp_folder)
 	os.mkdir(exp_folder) if not os.path.isdir(exp_folder) else None
 
@@ -297,10 +349,6 @@ if params['debug'] == False:
 
 print('\nGetting AUC . . .')
 
-if params['val_metric'] == 'val_auc':
-	# if val_auc computed: stored in model history
-	auc_val = max(model.history.history['val_auc'])
-
 # load best model (fit_generator() returns weights of last epoch)
 K.clear_session()
 model = load_model(os.path.join(OUTPUT, 'model.h5'), compile=False)
@@ -309,25 +357,26 @@ model.compile(
 	loss='binary_crossentropy', 
 	metrics=['accuracy'])
 
-if params['val_metric'] == 'val_acc':
-	# reset generator
-	val_generator = batch_generator(
-		train_path,
-		f2l_val,
-		batch_size,
-		mode='eval',
-		aug=None)
+# reset generator
+val_generator = batch_generator(
+	train_path,
+	f2l_val,
+	batch_size,
+	mode='eval',
+	aug=False)
 
-	preds = model.predict_generator(
-		generator=val_generator, 
-		steps=steps_val, 
-		verbose=1,
-		workers=0)
+preds_val = model.predict_generator(
+	generator=val_generator, 
+	steps=steps_val, 
+	verbose=1,
+	workers=0)
 
-	auc_val = roc_auc_score(np.array(f2l_val['label']), preds)
+preds_val = np.squeeze(preds_val)  # save for ensembling
+
+auc_val = roc_auc_score(np.array(f2l_val['label']), preds_val)
 
 # CHECKS
-model.evaluate_generator(generator=val_generator, steps=steps_val, verbose=1)
+# model.evaluate_generator(generator=val_generator, steps=steps_val, verbose=1)
 
 # def get_pred(file_path):
 # 	img = load_image(file_path)
@@ -361,7 +410,7 @@ if params['debug'] == True:
 N_test = len(test_files)
 steps_test = int(np.ceil(N_test / batch_size))
 
-preds = []
+preds_test = []
 idx = 0
 for i in tqdm(range(steps_test)):
 	imgs = []
@@ -380,12 +429,12 @@ for i in tqdm(range(steps_test)):
 	# predict and add to list
 	imgs = np.array(imgs)
 	pred = model.predict(imgs)
-	preds.extend(pred)
+	preds_test.extend(pred)
 
-preds = np.squeeze(preds)
+preds_test = np.squeeze(preds_test)  # save for ensembling
 
 test_ids = [f[:-4] for f in test_files]
-submission = pd.DataFrame({'id': test_ids, 'label': preds})
+submission = pd.DataFrame({'id': test_ids, 'label': preds_test})
 
 time_pred = np.round((time.time() - ts) / 60, 2)
 
@@ -399,15 +448,24 @@ summary = pd.DataFrame(
 	[architecture, auc_val, time_train, time_pred],
 	index=['architecture', 'auc_val', 'time_train', 'time_pred'])
 
-def export_model(folder, model, params, submission, summary):
-	model.save(os.path.join(folder, 'model.h5'))
-	params_df = pd.DataFrame.from_dict(params, orient='index')
-	params_df.to_csv(os.path.join(folder, 'params.csv'), header=False)
-	submission.to_csv(os.path.join(folder, 'submission.csv'), index=False)
-	summary.to_csv(os.path.join(folder, 'summary.csv'), header=False)
+if params['debug'] == False:	
+	model.save(os.path.join(exp_folder, 'model.h5'))
+	params = pd.DataFrame.from_dict(params, orient='index')
+	params.to_csv(os.path.join(exp_folder, 'params.csv'), header=False)
+	submission.to_csv(os.path.join(exp_folder, 'submission.csv'), index=False)
+	summary.to_csv(os.path.join(exp_folder, 'summary.csv'), header=False)
 
-if params['debug'] == False:
-	export_model(exp_folder, model, params, submission, summary)
+	preds_val = pd.DataFrame(preds_val)
+	preds_val.to_csv(
+		os.path.join(exp_folder, 'preds_val.csv'), 
+		header=False, 
+		index=False)
+	preds_test = pd.DataFrame(preds_test)
+	preds_test.to_csv(
+		os.path.join(exp_folder, 'preds_test.csv'), 
+		header=False, 
+		index=False)
+
 	os.rename(log_file, os.path.join(exp_folder, log_name))  # save log
 
 print('\n-----------------------')

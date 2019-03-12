@@ -12,13 +12,13 @@ TODO:
 
 # params
 params = {
-	'debug': True,  # debug mode (uses less images)
-	'cloud': False,  # if script to be run via paperspace.com using GPU
+	'debug': False,  # debug mode (uses less images)
+	'cloud': True,  # if script to be run via paperspace.com using GPU
 	'val_size': 0.1,
 	'batch_size': 32,
-	'epochs': 10,
+	'epochs': 1,
 	'learning_rate': 0.0001,
-	'val_metric': 'val_acc',  # 'val_acc' (accuracy) or 'val_auc' (AUC)
+	'val_metric': 'val_auc',  # 'val_acc' (accuracy) or 'val_auc' (AUC)
 	'early_stopping': False,
 	'patience': 10}
 
