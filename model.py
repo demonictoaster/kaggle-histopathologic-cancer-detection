@@ -9,14 +9,11 @@ import pandas as pd
 import time
 
 import cv2
-from imgaug import augmenters as iaa
-import imgaug as ia
-from tqdm import tqdm
 from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import train_test_split
-# from keras.applications.inception_v3 import InceptionV3
-# from keras.applications.inception_v3 import preprocess_input
-from keras.applications.nasnet import NASNetMobile, preprocess_input
+# from keras.applications.inception_v3 import InceptionV3, preprocess_input
+# from keras.applications.nasnet import NASNetMobile, preprocess_input
+from keras.applications.densenet import DenseNet169, preprocess_input
 from keras.callbacks import Callback, CSVLogger, EarlyStopping, ModelCheckpoint
 from keras.preprocessing import image
 from keras.models import Model, load_model
@@ -27,6 +24,7 @@ from keras import backend as K
 import tensorflow as tf
 
 from config import *
+from augmentation import *
 
 
 """
@@ -43,10 +41,6 @@ NOTES:
   of validation examples is not a multiple of the batch size)
 - applying image augmentation doesn't increase batch size, only replaces
   a random subset of the images within the batch
-
-TODO:
-- data augmentation
-- make batch_generator thread safe
 """
 
 K.clear_session()
@@ -56,12 +50,12 @@ test_path = os.path.join(INPUT, 'test')
 	
 file_label_map = pd.read_csv(INPUT + '/train_labels.csv')
 if params['debug'] == True:
-	file_label_map = file_label_map.iloc[0:200]
+	file_label_map = file_label_map.iloc[0:500]
 
 f2l_train, f2l_val = train_test_split(
 	file_label_map, 
 	test_size=params['val_size'],
-	random_state=12)
+	random_state=params['seed_validation_split'])
 
 batch_size = params['batch_size']
 epochs = params['epochs']
@@ -80,57 +74,6 @@ def load_image(file_path):
 	img = cv2.imread(os.path.join(file_path))
 	img = img[:,:,::-1]  # BGR -> RGB
 	return img
-
-# data augmentation (slightly adapted from https://github.com/aleju/imgaug)
-def get_augmenter():
-	# apply augmenter in 50% of cases
-	sometimes = lambda aug: iaa.Sometimes(0.5, aug)
-
-	seq = iaa.Sequential(
-		[
-			iaa.Fliplr(0.5),
-			iaa.Flipud(0.2),
-
-			sometimes(iaa.Affine(
-				scale={"x": (0.9, 1.1), "y": (0.9, 1.1)},
-				translate_percent={"x": (-0.1, 0.1), "y": (-0.1, 0.1)},
-				rotate=(-10, 10),
-				shear=(-5, 5),
-				order=[0, 1],
-				cval=(0, 255),
-				mode=ia.ALL
-			)),
-			# execute 0 to 5 of the following (less important) augmenters
-			# don't execute all of them, as that would often be way too strong
-			iaa.SomeOf((0, 5),
-				[
-					iaa.OneOf([
-						iaa.GaussianBlur((0, 1)),
-						iaa.AverageBlur(k=(3, 5)),
-						iaa.MedianBlur(k=(3, 5)),
-					]),
-					iaa.Sharpen(alpha=(0, 1.0), lightness=(0.9, 1.1)),
-					iaa.Emboss(alpha=(0, 1.0), strength=(0, 2.0)),
-					iaa.AddToHueAndSaturation((-1, 1)),
-					# either change the brightness of the whole image
-					# or change the brightness of subareas
-					iaa.OneOf([
-						iaa.Multiply((0.9, 1.1), per_channel=0.5),
-						iaa.FrequencyNoiseAlpha(
-							exponent=(-1, 0),
-							first=iaa.Multiply((0.9, 1.1), per_channel=True),
-							second=iaa.ContrastNormalization((0.9, 1.1))
-						)
-					]),
-					iaa.ContrastNormalization((0.9, 1.1), per_channel=0.5),
-				],
-				random_order=True
-			)
-		],
-		random_order=True
-	)
-
-	return seq
 
 def batch_generator(input_path, 
 					f2l, 
@@ -185,7 +128,7 @@ train_generator = batch_generator(
 	f2l_train,
 	batch_size,
 	mode='train',
-	aug=True)
+	aug=params['data_aug'])
 
 val_generator = batch_generator(
 	train_path,
@@ -193,17 +136,6 @@ val_generator = batch_generator(
 	batch_size,
 	mode='eval',
 	aug=False)
-
-# CHECKS
-# cnt = 0
-# for i, j in train_generator:
-# 	cnt += 1
-# 	print(cnt)
-# 	print(i.shape)
-# 	print(np.mean(i))
-# 	print('-------')
-# 	if cnt==6:
-# 		break
 
 ###################
 ### build model ###
@@ -251,6 +183,7 @@ log_file = os.path.join(OUTPUT, log_name)
 os.remove(log_file) if os.path.exists(log_file) else None
 
 callback_list = [
+	auc_callback(val_generator, steps_val, f2l_val['label']),
 	ModelCheckpoint(
 		filepath=os.path.join(OUTPUT, 'model.h5'), 
 		monitor=params['val_metric'], 
@@ -258,29 +191,19 @@ callback_list = [
 		mode='max'),
 	CSVLogger(log_file)]
 
-if params['val_metric'] == 'val_auc':
-	callback_list.insert(
-		0, 
-		auc_callback(val_generator, steps_val, f2l_val['label']))
-
 if params['early_stopping'] == True:
-	if params['val_metric']=='val_auc':
-		pos = 1
-	else:
-		pos = 0
-
 	callback_list.insert(
-		pos, 
+		3,
 		EarlyStopping(
-			monitor=params['val_metric'],
-			patience=params['patience']))
+		monitor=params['val_metric'],
+		patience=params['patience']))
 
 def build_model(input_shape=(IMG_SIZE, IMG_SIZE, 3)):
 	X_input = Input(shape=input_shape)
-	base_model = NASNetMobile(
+	base_model = DenseNet169(
 		input_tensor=X_input,
 		include_top=False, 
-		weights='imagenet')
+		weights=params['weights_init'])
 
 	# if params['debug']==True:
 	# 	for l in base_model.layers:
@@ -299,7 +222,7 @@ def build_model(input_shape=(IMG_SIZE, IMG_SIZE, 3)):
 	model.compile(
 		optimizer=Adam(params['learning_rate']),
 		loss='binary_crossentropy',
-		metrics=['accuracy'])
+		metrics=['acc'])
 
 	return model
 
@@ -327,21 +250,26 @@ model.fit_generator(
 
 time_train = np.round((time.time() - ts) / 60, 2)
 
-# make architecture folder and export subfolder
-arc_folder  = os.path.join(OUTPUT, architecture)  # e.g. './NasNet'
-os.makedirs(arc_folder) if not os.path.isdir(arc_folder) else None
-
 if params['debug'] == False:
+	# make architecture folder and export subfolder
+	arc_folder  = os.path.join(OUTPUT, architecture)  # e.g. './NasNet'
+	os.makedirs(arc_folder) if not os.path.isdir(arc_folder) else None
+
 	today = datetime.datetime.now()
 	exp_folder = today.strftime('%y%m%d') + '_' + today.strftime("%H%M")
 	exp_folder = os.path.join(arc_folder, exp_folder)
 	os.mkdir(exp_folder) if not os.path.isdir(exp_folder) else None
 
 	# save plot
-	plt.plot(model.history.history['acc'], label='Accuracy')
-	plt.plot(model.history.history['val_acc'], label='Epoch')
-	plt.legend(['Train', 'Val'], loc='upper left')
-	plt.savefig(os.path.join(exp_folder, 'plot_acc.png'))
+	def save_plot(metric_1, metric_2, name):
+		plt.figure()
+		plt.plot(model.history.history[metric_1], label=metric_1)
+		plt.plot(model.history.history[metric_2], label=metric_2)
+		plt.legend(loc='upper left')
+		plt.savefig(os.path.join(exp_folder, name))
+
+	save_plot('acc', 'val_acc', 'plot_acc.png')
+	save_plot('loss', 'val_loss', 'plot_loss.png')
 
 #####################
 ### get AUC score ###
@@ -368,32 +296,12 @@ val_generator = batch_generator(
 preds_val = model.predict_generator(
 	generator=val_generator, 
 	steps=steps_val, 
-	verbose=1,
+	verbose=2,
 	workers=0)
 
 preds_val = np.squeeze(preds_val)  # save for ensembling
 
 auc_val = roc_auc_score(np.array(f2l_val['label']), preds_val)
-
-# CHECKS
-# model.evaluate_generator(generator=val_generator, steps=steps_val, verbose=1)
-
-# def get_pred(file_path):
-# 	img = load_image(file_path)
-# 	img = preprocess_input(img)
-# 	img = np.expand_dims(img, axis=0)
-# 	pred = float(model.predict(img))
-# 	return pred
-
-# preds = []
-# for id in tqdm(f2l_val['id']):
-# 	f_path = os.path.join(train_path, id + '.tif')
-# 	pred = get_pred(f_path)
-# 	preds.append(pred)
-
-# from sklearn.metrics import accuracy_score
-# preds_lab = np.array([1 if x>=0.5 else 0 for x in preds])
-# accuracy_score(np.array(f2l_val['label']), preds_lab)
 
 ########################
 ### make predictions ###
@@ -412,7 +320,7 @@ steps_test = int(np.ceil(N_test / batch_size))
 
 preds_test = []
 idx = 0
-for i in tqdm(range(steps_test)):
+for i in range(steps_test):
 	imgs = []
 
 	# fill batch
@@ -426,12 +334,19 @@ for i in tqdm(range(steps_test)):
 		if idx == N_test:
 			break
 
-	# predict and add to list
 	imgs = np.array(imgs)
-	pred = model.predict(imgs)
-	preds_test.extend(pred)
 
-preds_test = np.squeeze(preds_test)  # save for ensembling
+	if params['test_time_aug'] == True:
+		# vertical flip + horizontal flip + both 
+		preds_1 = model.predict(imgs).ravel()
+		preds_2 = model.predict(imgs[:, ::-1, :, :]).ravel()
+		preds_3 = model.predict(imgs[:, :, ::-1, :]).ravel()
+		preds_4 = model.predict(imgs[:, ::-1, ::-1, :]).ravel()
+		preds_batch = np.mean([preds_1,preds_2,preds_3,preds_4], axis=0)
+		preds_test += preds_batch.tolist()
+	else:
+		preds_batch = model.predict(imgs).ravel()
+		preds_test += preds_batch.tolist()
 
 test_ids = [f[:-4] for f in test_files]
 submission = pd.DataFrame({'id': test_ids, 'label': preds_test})
@@ -467,6 +382,10 @@ if params['debug'] == False:
 		index=False)
 
 	os.rename(log_file, os.path.join(exp_folder, log_name))  # save log
+
+	# rename exp folder to include AUC score
+	new_name = exp_folder + '_score_' + str(round(auc_val, 6))
+	os.rename(exp_folder, new_name)
 
 print('\n-----------------------')
 print('SUMMARY:')
