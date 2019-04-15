@@ -18,7 +18,7 @@ NOTE:
 
 TODO:
 - to find near duplicates, could to get vaguely similar pictures (based on some
-  hammer distance threshold of hashes) and then somehow compare their intensity 
+  hammer distance threshold of hashes) and then compare their intensity 
   histogram (e.g. look at some quantiles) after different rotations, etc.
 """
 

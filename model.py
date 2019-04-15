@@ -122,7 +122,7 @@ def batch_generator(input_path,
 
 		yield(imgs, lbls)
 
-# initialize the generators (see utils.py)
+# initialize the generators
 train_generator = batch_generator(
 	train_path,
 	f2l_train,
