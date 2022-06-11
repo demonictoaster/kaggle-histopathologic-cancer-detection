@@ -1,5 +1,5 @@
 ## Kaggle Histopathologic Cancer Detection Competition
-Code used for competition submission. This solution got me in the top 14% on the private leaderboard (out of 1157 competitors). Unfortunately there was a data leak near the end of the competition. Exploiting the leak, some participants were able to get a perfect score.
+Code used for competition submission. This solution got me in the top 14% on the private leaderboard (out of 1157 competitors). Unfortunately there was a data leak near the end of the competition. By exploiting the leak, some participants were able to get a perfect score.
 
 # Overview
 The goal is to detect the presence of metastatic cancer in image patches taken from pathology scans (i.e. binary classification task).
